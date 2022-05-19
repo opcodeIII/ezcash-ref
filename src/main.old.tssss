@@ -1,0 +1,167 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
+import puppeteer from 'puppeteer';
+import * as cheerio from 'cheerio';
+import fs from 'fs';
+import userAgents from './userAgents.const';
+
+import ExecuteAPI from './executeVKApi';
+import { sleep, randomInt, randomChoice } from './utils';
+import Captcha from './captcha';
+
+const captcha = new Captcha("e60f782d94e78795acb9ff55a957255c");
+
+const useAccount = async(account: string, proxy: string | null = null) => {
+    const creds = account.split(":");
+
+    const login = creds[0];
+    const password = creds[1];
+    const token = creds[2];
+
+    const userInformation = await ExecuteAPI('users.get', token);
+    console.log(userInformation[0]);
+    if(userInformation[0].deactivated && userInformation[0].deactivated === "banned") {
+        throw new Error("Account banned");
+    }
+
+    const browser = await puppeteer.launch({headless: false, args: [`--proxy-server=http://176.9.113.66:7832`], ignoreHTTPSErrors: true});
+    const page = await browser.newPage();
+
+    await page.authenticate({
+        username: "S0cKUe5suE",
+        password: "sbL9jtheX3"
+    })
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+        if (req.resourceType() === 'image' || req.resourceType() === 'stylesheet' || req.resourceType() === 'font') {
+            req.abort();
+        } else {
+            req.continue();
+        }
+    });
+    const useragent = randomChoice(userAgents);
+    console.log('using user agent: ' + useragent);
+    await page.setUserAgent(useragent);
+
+    console.log('activating ezcash ref');
+    await page.goto('https://ezcash.direct/r/gayzone', {waitUntil: 'load'});
+
+    console.log('okay, now authorization!')
+    await page.goto("https://ezcash.wtf/login/vk", {waitUntil: 'load'});
+
+    await page.waitForSelector("input[name=email]", {timeout: 10000});
+    const loginEl = await page.$("input[name=email]");
+    const passEl = await page.$("input[name=pass]");
+
+    await loginEl?.focus();
+    await page.keyboard.type(login);
+    await passEl?.focus();
+    await page.keyboard.type(password);
+
+    await page.evaluate("document.querySelector('form').submit()");
+    await page.waitForTimeout(10000);
+
+    if((await page.url()).includes("?act=authcheck")) {
+        throw new Error("2FA Detected!");
+    } else if ((await page.url()).includes('vk.com')) {
+        const allowButton = await page.$("button.flat_button:nth-child(1)");
+        if (allowButton !== null) {
+            await allowButton.click();
+            await page.waitForNavigation();
+        } else {
+            const pageContent = await page.content();
+            const $ = cheerio.load(pageContent);
+
+            const isError = $(".box_error");
+            if (isError.text()) {
+                await browser.close();
+                throw new Error(`VK Error: ${isError.text()}.`);
+            } else {
+                const captchaSid = $("input[name=captcha_sid]").val();
+                const captchaImg = $(".oauth_captcha").attr('src');
+
+                if (captchaImg && captchaSid) {
+                    console.log('WARN: captcha detected! Try to solve it.');
+                    const taskId = await captcha.image(captchaImg);
+                    console.log(`TaskID: ${taskId}`);
+                    const key = await captcha.waitResult(taskId);
+                    console.log(`KEY: ${key}`)
+                    
+                    const passEl1 = await page.$("input[name=pass]");
+                    const captchaEl = await page.$("input[name=captcha_key]");
+
+                    await passEl1?.focus();
+                    await page.keyboard.type(password);
+                    await captchaEl?.focus();
+                    await page.keyboard.type(key);
+                    await page.evaluate("login()");
+
+                    await page.waitForNavigation();
+                    const allowButton = await page.$("button.flat_button:nth-child(1)");
+                    if (allowButton !== null) {
+                        await allowButton.click();
+                        await page.waitForNavigation();
+                    } else {
+                        const pageContent = await page.content();
+                        const $ = cheerio.load(pageContent);
+
+                        const isError = $(".box_error");
+                        if (isError.text()) {
+                            await browser.close();
+                            throw new Error(`VK Error: ${isError.text()}.`);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    await page.waitForTimeout(3500);
+    const authButtonCheck = await page.$("a.btn-primary");
+    if (authButtonCheck !== null) {
+        await browser.close();
+        throw new Error("Authoization failed.")
+    }
+
+    await page.waitForTimeout(5000);
+    let success = false;
+
+    for (var i = 0; i<5; i ++) {
+        const pageUrl = await page.url();
+        if (pageUrl.includes('ezcash') && !pageUrl.includes('/access')) {
+            success = true;
+            break;
+        }
+        await sleep(1000);
+    }
+
+    if (!success) {
+        await browser.close();
+        throw new Error("Ops! Error: can not load ezcash!")
+    }
+
+    const cookies = await page.cookies();
+    let cookiesNetscape = [];
+    for(var cookie of cookies) {
+        const http = cookie.httpOnly;
+        const cook = [cookie.domain, 'TRUE', cookie.path, 'TRUE' ? http : 'FALSE', cookie.expires, cookie.name, cookie.value].join("\t");
+        cookiesNetscape.push(cook);
+    }
+    const cookiesPath = `cookies/${login}-${randomInt(3,10000)}.txt`;
+    fs.writeFileSync(cookiesPath, cookiesNetscape.join("\n"));
+    console.log('Success.');
+    await browser.close();
+}
+
+async function main() {
+    const accounts = fs.readFileSync('./accounts.txt', 'utf-8').split("\n");
+    for(var account of accounts) {
+        try {
+            await useAccount(account);
+        } catch (e: any) {
+            console.log(`ERROR: ${e}`);
+        }
+    }
+}
+main();
